@@ -1,0 +1,948 @@
+package sh.haven.feature.terminal
+
+import android.app.Activity
+import android.os.SystemClock
+import androidx.compose.foundation.horizontalScroll
+import androidx.compose.ui.ExperimentalComposeUiApi
+import androidx.compose.ui.input.pointer.pointerInteropFilter
+import androidx.compose.ui.window.PopupProperties
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.ExperimentalLayoutApi
+import androidx.compose.foundation.layout.IntrinsicSize
+import androidx.compose.foundation.layout.PaddingValues
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.WindowInsets
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
+import androidx.compose.foundation.layout.isImeVisible
+import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.DesktopWindows
+import androidx.compose.material3.ButtonDefaults
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
+import androidx.compose.material3.FilledTonalButton
+import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
+import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.Surface
+import androidx.compose.material3.Text
+import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.platform.LocalView
+import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
+import androidx.core.view.WindowCompat
+import androidx.core.view.WindowInsetsCompat
+import org.connectbot.terminal.SelectionController
+import sh.haven.core.data.db.entities.Snippet
+import sh.haven.core.data.preferences.TerminalComboKey
+import sh.haven.core.data.preferences.TerminalComboKeys
+import sh.haven.core.data.preferences.ToolbarItem
+import sh.haven.core.data.preferences.ToolbarKey
+import kotlinx.coroutines.delay
+import sh.haven.core.data.preferences.ToolbarLayout
+import androidx.compose.ui.res.stringResource
+import sh.haven.feature.terminal.R
+
+// VT100/xterm escape sequences for special keys
+private const val ESC = "\u001b"
+private const val MENU_ANCHOR_REOPEN_SUPPRESSION_MS = 300L
+private val KEY_ESC = byteArrayOf(0x1b)
+private val KEY_TAB = byteArrayOf(0x09)
+private val KEY_SHIFT_TAB = "$ESC[Z".toByteArray()
+private val KEY_UP = "$ESC[A".toByteArray()
+private val KEY_DOWN = "$ESC[B".toByteArray()
+private val KEY_RIGHT = "$ESC[C".toByteArray()
+private val KEY_LEFT = "$ESC[D".toByteArray()
+private val KEY_HOME = "$ESC[H".toByteArray()
+private val KEY_END = "$ESC[F".toByteArray()
+private val KEY_PGUP = "$ESC[5~".toByteArray()
+private val KEY_PGDN = "$ESC[6~".toByteArray()
+
+/** Keys that form the aligned navigation block across rows. */
+private val NAV_KEYS = setOf(
+    ToolbarKey.ARROW_UP, ToolbarKey.ARROW_DOWN,
+    ToolbarKey.ARROW_LEFT, ToolbarKey.ARROW_RIGHT,
+    ToolbarKey.HOME, ToolbarKey.END,
+    ToolbarKey.PGUP, ToolbarKey.PGDN,
+)
+
+/**
+ * Fixed grid positions for the nav block.
+ * Row 0 (top):    [Home] [ ↑ ] [End] [PgUp]
+ * Row 1 (bottom): [ ← ] [ ↓ ] [ → ] [PgDn]
+ */
+private val NAV_GRID_TOP = arrayOf(
+    ToolbarKey.HOME,
+    ToolbarKey.ARROW_UP,
+    ToolbarKey.END,
+    ToolbarKey.PGUP,
+)
+private val NAV_GRID_BOTTOM = arrayOf(
+    ToolbarKey.ARROW_LEFT,
+    ToolbarKey.ARROW_DOWN,
+    ToolbarKey.ARROW_RIGHT,
+    ToolbarKey.PGDN,
+)
+
+/** Width of each cell in the nav block grid. */
+private val NAV_CELL_WIDTH = 44.dp
+
+@OptIn(ExperimentalLayoutApi::class)
+@Composable
+fun KeyboardToolbar(
+    onSendBytes: (ByteArray) -> Unit,
+    focusRequester: FocusRequester,
+    ctrlActive: Boolean = false,
+    altActive: Boolean = false,
+    bracketPasteMode: Boolean = false,
+    layout: ToolbarLayout = ToolbarLayout.DEFAULT,
+    onToggleCtrl: () -> Unit = {},
+    onToggleAlt: () -> Unit = {},
+    onVncTap: (() -> Unit)? = null,
+    snippets: List<Snippet> = emptyList(),
+    onSnippetSelected: (Snippet) -> Unit = {},
+    comboKeys: List<TerminalComboKey> = TerminalComboKeys.PRESETS,
+    onComboKeySelected: (TerminalComboKey) -> Unit = {},
+    selectionController: SelectionController? = null,
+    selectionActive: Boolean = false,
+    hyperlinkUri: String? = null,
+    onPaste: (String) -> Unit = {},
+    modifier: Modifier = Modifier,
+) {
+    var shiftActive by remember { mutableStateOf(false) }
+    val view = LocalView.current
+    val imeVisible = WindowInsets.isImeVisible
+
+    Surface(
+        tonalElevation = 2.dp,
+        modifier = modifier,
+    ) {
+        if (selectionActive && selectionController != null) {
+            // Selection mode: show selection controls, optionally with row 1.
+            Column {
+                if (layout.rows.size >= 2) {
+                    // Keep row 1 visible so height stays at 2 rows
+                    ToolbarRow(
+                        items = layout.row1,
+                        onSendBytes = onSendBytes,
+                        focusRequester = focusRequester,
+                        ctrlActive = ctrlActive,
+                        altActive = altActive,
+                        shiftActive = shiftActive,
+                        imeVisible = imeVisible,
+                        view = view,
+                        onToggleCtrl = onToggleCtrl,
+                        onToggleAlt = onToggleAlt,
+                        onToggleShift = { shiftActive = !shiftActive },
+                        onShiftUsed = { shiftActive = false },
+                        onVncTap = onVncTap,
+                        snippets = snippets,
+                        onSnippetSelected = onSnippetSelected,
+                        comboKeys = comboKeys,
+                        onComboKeySelected = onComboKeySelected,
+                    )
+                }
+                SelectionToolbarContent(
+                    controller = selectionController,
+                    hyperlinkUri = hyperlinkUri,
+                    bracketPasteMode = bracketPasteMode,
+                    onPaste = onPaste,
+                )
+            }
+        } else if (layout.rows.size >= 2) {
+            // Two-row layout: use aligned nav block grid
+            AlignedToolbarContent(
+                layout = layout,
+                onSendBytes = onSendBytes,
+                focusRequester = focusRequester,
+                ctrlActive = ctrlActive,
+                altActive = altActive,
+                shiftActive = shiftActive,
+                imeVisible = imeVisible,
+                view = view,
+                onToggleCtrl = onToggleCtrl,
+                onToggleAlt = onToggleAlt,
+                onToggleShift = { shiftActive = !shiftActive },
+                onShiftUsed = { shiftActive = false },
+                onVncTap = onVncTap,
+                snippets = snippets,
+                onSnippetSelected = onSnippetSelected,
+                comboKeys = comboKeys,
+                onComboKeySelected = onComboKeySelected,
+            )
+        } else {
+            // Single-row fallback
+            Column {
+                for (row in layout.rows) {
+                    if (row.isNotEmpty()) {
+                        ToolbarRow(
+                            items = row,
+                            onSendBytes = onSendBytes,
+                            focusRequester = focusRequester,
+                            ctrlActive = ctrlActive,
+                            altActive = altActive,
+                            shiftActive = shiftActive,
+                            imeVisible = imeVisible,
+                            view = view,
+                            onToggleCtrl = onToggleCtrl,
+                            onToggleAlt = onToggleAlt,
+                            onToggleShift = { shiftActive = !shiftActive },
+                            onShiftUsed = { shiftActive = false },
+                            onVncTap = onVncTap,
+                            snippets = snippets,
+                        onSnippetSelected = onSnippetSelected,
+                            comboKeys = comboKeys,
+                            onComboKeySelected = onComboKeySelected,
+                        )
+                    }
+                }
+            }
+        }
+    }
+}
+
+/**
+ * Renders the two-row toolbar with an aligned navigation block.
+ *
+ * Layout: [left keys] [nav grid] [symbols]
+ * Both rows scroll together so the nav block stays vertically aligned.
+ */
+@Composable
+private fun AlignedToolbarContent(
+    layout: ToolbarLayout,
+    onSendBytes: (ByteArray) -> Unit,
+    focusRequester: FocusRequester,
+    ctrlActive: Boolean,
+    altActive: Boolean,
+    shiftActive: Boolean,
+    imeVisible: Boolean,
+    view: android.view.View,
+    onToggleCtrl: () -> Unit,
+    onToggleAlt: () -> Unit,
+    onToggleShift: () -> Unit,
+    onShiftUsed: () -> Unit,
+    onVncTap: (() -> Unit)?,
+    snippets: List<Snippet>,
+    onSnippetSelected: (Snippet) -> Unit,
+    comboKeys: List<TerminalComboKey>,
+    onComboKeySelected: (TerminalComboKey) -> Unit,
+) {
+    // Split each row into: left (non-nav), right (non-nav after nav keys)
+    val (row1Left, row1Right) = splitAroundNav(layout.row1)
+    val (row2Left, row2Right) = splitAroundNav(layout.row2)
+
+    // Collect which nav keys are present across all rows
+    val presentNavKeys = layout.rows.flatten()
+        .filterIsInstance<ToolbarItem.BuiltIn>()
+        .filter { it.key in NAV_KEYS }
+        .map { it.key }
+        .toSet()
+
+    // If no nav keys present, fall back to simple rows
+    if (presentNavKeys.isEmpty()) {
+        Column {
+            ToolbarRow(layout.row1, onSendBytes, focusRequester, ctrlActive, altActive,
+                shiftActive, imeVisible, view, onToggleCtrl, onToggleAlt, onToggleShift, onShiftUsed, onVncTap, snippets, onSnippetSelected,
+                comboKeys, onComboKeySelected)
+            ToolbarRow(layout.row2, onSendBytes, focusRequester, ctrlActive, altActive,
+                shiftActive, imeVisible, view, onToggleCtrl, onToggleAlt, onToggleShift, onShiftUsed, onVncTap, snippets, onSnippetSelected,
+                comboKeys, onComboKeySelected)
+        }
+        return
+    }
+
+    // All three columns scroll together for alignment
+    Row(
+        modifier = Modifier
+            .horizontalScroll(rememberScrollState())
+            .padding(horizontal = 4.dp),
+    ) {
+        // Left keys column — uses IntrinsicSize.Max so both rows have equal width
+        Column(modifier = Modifier.width(IntrinsicSize.Max)) {
+            KeyRow(Modifier.fillMaxWidth()) {
+                for (item in row1Left) {
+                    RenderItem(item, onSendBytes, focusRequester, ctrlActive, altActive,
+                        shiftActive, imeVisible, view, onToggleCtrl, onToggleAlt, onToggleShift, onShiftUsed,
+                        comboKeys, onComboKeySelected)
+                    if (item is ToolbarItem.BuiltIn && item.key == ToolbarKey.KEYBOARD) {
+                        SnippetsDropdown(
+                            snippets = snippets,
+                            focusRequester = focusRequester,
+                            imeVisible = imeVisible,
+                            view = view,
+                            onSelect = onSnippetSelected,
+                        )
+                    }
+                }
+            }
+            KeyRow(Modifier.fillMaxWidth()) {
+                // VNC Desktop icon at start of row 2
+                if (onVncTap != null) {
+                    ToolbarIconButton(Icons.Filled.DesktopWindows, "VNC Desktop", onVncTap)
+                }
+                for (item in row2Left) {
+                    RenderItem(item, onSendBytes, focusRequester, ctrlActive, altActive,
+                        shiftActive, imeVisible, view, onToggleCtrl, onToggleAlt, onToggleShift, onShiftUsed,
+                        comboKeys, onComboKeySelected)
+                    if (item is ToolbarItem.BuiltIn && item.key == ToolbarKey.KEYBOARD) {
+                        SnippetsDropdown(
+                            snippets = snippets,
+                            focusRequester = focusRequester,
+                            imeVisible = imeVisible,
+                            view = view,
+                            onSelect = onSnippetSelected,
+                        )
+                    }
+                }
+            }
+        }
+
+        // Nav block grid — fixed-width cells ensure vertical alignment
+        Column {
+            KeyRow {
+                for (key in NAV_GRID_TOP) {
+                    if (key in presentNavKeys) {
+                        NavBuiltInKey(key, onSendBytes, shiftActive, onShiftUsed)
+                    } else {
+                        NavCell {}
+                    }
+                }
+            }
+            KeyRow {
+                for (key in NAV_GRID_BOTTOM) {
+                    if (key in presentNavKeys) {
+                        NavBuiltInKey(key, onSendBytes, shiftActive, onShiftUsed)
+                    } else {
+                        NavCell {}
+                    }
+                }
+            }
+        }
+
+        // Right keys (symbols) — typically only on row 2
+        if (row1Right.isNotEmpty() || row2Right.isNotEmpty()) {
+            Column {
+                if (row1Right.isNotEmpty()) {
+                    KeyRow {
+                        for (item in row1Right) {
+                            RenderItem(item, onSendBytes, focusRequester, ctrlActive, altActive,
+                                shiftActive, imeVisible, view, onToggleCtrl, onToggleAlt, onToggleShift, onShiftUsed,
+                                comboKeys, onComboKeySelected)
+                            if (item is ToolbarItem.BuiltIn && item.key == ToolbarKey.KEYBOARD) {
+                                SnippetsDropdown(
+                                    snippets = snippets,
+                                    focusRequester = focusRequester,
+                                    imeVisible = imeVisible,
+                                    view = view,
+                                    onSelect = onSnippetSelected,
+                                )
+                            }
+                        }
+                    }
+                } else {
+                    Spacer(Modifier.height(34.dp))
+                }
+                KeyRow {
+                    for (item in row2Right) {
+                        RenderItem(item, onSendBytes, focusRequester, ctrlActive, altActive,
+                            shiftActive, imeVisible, view, onToggleCtrl, onToggleAlt, onToggleShift, onShiftUsed,
+                            comboKeys, onComboKeySelected)
+                        if (item is ToolbarItem.BuiltIn && item.key == ToolbarKey.KEYBOARD) {
+                            SnippetsDropdown(
+                                snippets = snippets,
+                                focusRequester = focusRequester,
+                                imeVisible = imeVisible,
+                                view = view,
+                                onSelect = onSnippetSelected,
+                            )
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+/** A single toolbar key row with standard padding and alignment. */
+@Composable
+private fun KeyRow(
+    modifier: Modifier = Modifier,
+    content: @Composable () -> Unit,
+) {
+    Row(
+        modifier = modifier.padding(vertical = 1.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        content()
+    }
+}
+
+/** Split a row's items into (before nav keys, after nav keys). Nav keys themselves are excluded. */
+private fun splitAroundNav(row: List<ToolbarItem>): Pair<List<ToolbarItem>, List<ToolbarItem>> {
+    val firstNavIdx = row.indexOfFirst { it is ToolbarItem.BuiltIn && it.key in NAV_KEYS }
+    val lastNavIdx = row.indexOfLast { it is ToolbarItem.BuiltIn && it.key in NAV_KEYS }
+    if (firstNavIdx == -1) return row to emptyList()
+    val left = row.subList(0, firstNavIdx)
+    val right = if (lastNavIdx + 1 < row.size) row.subList(lastNavIdx + 1, row.size) else emptyList()
+    return left to right
+}
+
+/** Render a nav-block key with fixed cell width. */
+@Composable
+private fun NavBuiltInKey(
+    key: ToolbarKey,
+    onSendBytes: (ByteArray) -> Unit,
+    shiftActive: Boolean,
+    onShiftUsed: () -> Unit,
+) {
+    when (key) {
+        ToolbarKey.ARROW_LEFT -> NavArrowButton("\u2190") { onSendBytes(KEY_LEFT) }
+        ToolbarKey.ARROW_UP -> NavArrowButton("\u2191") { onSendBytes(KEY_UP) }
+        ToolbarKey.ARROW_DOWN -> NavArrowButton("\u2193") { onSendBytes(KEY_DOWN) }
+        ToolbarKey.ARROW_RIGHT -> NavArrowButton("\u2192") { onSendBytes(KEY_RIGHT) }
+        ToolbarKey.HOME -> NavTextButton("Home") { onSendBytes(KEY_HOME) }
+        ToolbarKey.END -> NavTextButton("End") { onSendBytes(KEY_END) }
+        ToolbarKey.PGUP -> NavTextButton("PgUp") { onSendBytes(KEY_PGUP) }
+        ToolbarKey.PGDN -> NavTextButton("PgDn") { onSendBytes(KEY_PGDN) }
+        else -> Spacer(Modifier.width(NAV_CELL_WIDTH))
+    }
+}
+
+/** Render any toolbar item (non-nav keys in the left/right sections). */
+@Composable
+private fun RenderItem(
+    item: ToolbarItem,
+    onSendBytes: (ByteArray) -> Unit,
+    focusRequester: FocusRequester,
+    ctrlActive: Boolean,
+    altActive: Boolean,
+    shiftActive: Boolean,
+    imeVisible: Boolean,
+    view: android.view.View,
+    onToggleCtrl: () -> Unit,
+    onToggleAlt: () -> Unit,
+    onToggleShift: () -> Unit,
+    onShiftUsed: () -> Unit,
+    comboKeys: List<TerminalComboKey>,
+    onComboKeySelected: (TerminalComboKey) -> Unit,
+) {
+    when (item) {
+        is ToolbarItem.BuiltIn -> BuiltInKey(
+            key = item.key,
+            onSendBytes = onSendBytes,
+            focusRequester = focusRequester,
+            ctrlActive = ctrlActive,
+            altActive = altActive,
+            shiftActive = shiftActive,
+            imeVisible = imeVisible,
+            view = view,
+            onToggleCtrl = onToggleCtrl,
+            onToggleAlt = onToggleAlt,
+            onToggleShift = onToggleShift,
+            onShiftUsed = onShiftUsed,
+            comboKeys = comboKeys,
+            onComboKeySelected = onComboKeySelected,
+        )
+        is ToolbarItem.Custom -> {
+            SymbolButton(item.label) {
+                val bytes = item.send.toByteArray()
+                if (ctrlActive || altActive) {
+                    if (item.send.length == 1) {
+                        sendChar(item.send[0], ctrlActive, altActive, onSendBytes)
+                    } else {
+                        onSendBytes(bytes)
+                    }
+                    if (ctrlActive) onToggleCtrl()
+                    if (altActive) onToggleAlt()
+                } else {
+                    onSendBytes(bytes)
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun ToolbarRow(
+    items: List<ToolbarItem>,
+    onSendBytes: (ByteArray) -> Unit,
+    focusRequester: FocusRequester,
+    ctrlActive: Boolean,
+    altActive: Boolean,
+    shiftActive: Boolean,
+    imeVisible: Boolean,
+    view: android.view.View,
+    onToggleCtrl: () -> Unit,
+    onToggleAlt: () -> Unit,
+    onToggleShift: () -> Unit,
+    onShiftUsed: () -> Unit,
+    onVncTap: (() -> Unit)? = null,
+    snippets: List<Snippet> = emptyList(),
+    onSnippetSelected: (Snippet) -> Unit = {},
+    comboKeys: List<TerminalComboKey>,
+    onComboKeySelected: (TerminalComboKey) -> Unit,
+) {
+    Row(
+        modifier = Modifier
+            .horizontalScroll(rememberScrollState())
+            .padding(horizontal = 4.dp, vertical = 1.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        for (item in items) {
+            RenderItem(item, onSendBytes, focusRequester, ctrlActive, altActive,
+                shiftActive, imeVisible, view, onToggleCtrl, onToggleAlt, onToggleShift, onShiftUsed,
+                comboKeys, onComboKeySelected)
+            if (item is ToolbarItem.BuiltIn && item.key == ToolbarKey.KEYBOARD && onVncTap != null) {
+                ToolbarIconButton(Icons.Filled.DesktopWindows, "VNC Desktop", onVncTap)
+            }
+            if (item is ToolbarItem.BuiltIn && item.key == ToolbarKey.KEYBOARD) {
+                SnippetsDropdown(
+                    snippets = snippets,
+                    focusRequester = focusRequester,
+                    imeVisible = imeVisible,
+                    view = view,
+                    onSelect = onSnippetSelected,
+                )
+            }
+        }
+    }
+}
+
+@Composable
+private fun BuiltInKey(
+    key: ToolbarKey,
+    onSendBytes: (ByteArray) -> Unit,
+    focusRequester: FocusRequester,
+    ctrlActive: Boolean,
+    altActive: Boolean,
+    shiftActive: Boolean,
+    imeVisible: Boolean,
+    view: android.view.View,
+    onToggleCtrl: () -> Unit,
+    onToggleAlt: () -> Unit,
+    onToggleShift: () -> Unit,
+    onShiftUsed: () -> Unit,
+    comboKeys: List<TerminalComboKey>,
+    onComboKeySelected: (TerminalComboKey) -> Unit,
+) {
+    when (key) {
+        ToolbarKey.KEYBOARD -> {
+            ComboKeyDropdown(
+                comboKeys = comboKeys,
+                focusRequester = focusRequester,
+                imeVisible = imeVisible,
+                view = view,
+                onSelect = onComboKeySelected,
+            )
+        }
+        ToolbarKey.ESC_KEY -> ToolbarTextButton("Esc") { onSendBytes(KEY_ESC) }
+        ToolbarKey.TAB_KEY -> ToolbarTextButton("Tab") {
+            if (shiftActive) {
+                onSendBytes(KEY_SHIFT_TAB)
+                onShiftUsed()
+            } else {
+                onSendBytes(KEY_TAB)
+            }
+        }
+        ToolbarKey.SHIFT -> ToolbarToggleButton("Shift", shiftActive, onClick = onToggleShift)
+        ToolbarKey.CTRL -> ToolbarToggleButton("Ctrl", ctrlActive, onClick = onToggleCtrl)
+        ToolbarKey.ALT -> ToolbarToggleButton("Alt", altActive, onClick = onToggleAlt)
+        ToolbarKey.ALTGR -> {
+            val altGrActive = ctrlActive && altActive
+            ToolbarToggleButton("AltGr", altGrActive) {
+                if (altGrActive) {
+                    onToggleCtrl()
+                    onToggleAlt()
+                } else {
+                    if (!ctrlActive) onToggleCtrl()
+                    if (!altActive) onToggleAlt()
+                }
+            }
+        }
+        // Nav keys in BuiltInKey (used by flat ToolbarRow / selection mode row 1)
+        ToolbarKey.ARROW_LEFT -> ToolbarArrowButton("\u2190") { onSendBytes(KEY_LEFT) }
+        ToolbarKey.ARROW_UP -> ToolbarArrowButton("\u2191") { onSendBytes(KEY_UP) }
+        ToolbarKey.ARROW_DOWN -> ToolbarArrowButton("\u2193") { onSendBytes(KEY_DOWN) }
+        ToolbarKey.ARROW_RIGHT -> ToolbarArrowButton("\u2192") { onSendBytes(KEY_RIGHT) }
+        ToolbarKey.HOME -> ToolbarTextButton("Home") { onSendBytes(KEY_HOME) }
+        ToolbarKey.END -> ToolbarTextButton("End") { onSendBytes(KEY_END) }
+        ToolbarKey.PGUP -> ToolbarTextButton("PgUp") { onSendBytes(KEY_PGUP) }
+        ToolbarKey.PGDN -> ToolbarTextButton("PgDn") { onSendBytes(KEY_PGDN) }
+        else -> {
+            val ch = key.char ?: return
+            SymbolButton(key.label) {
+                sendChar(ch, ctrlActive, altActive, onSendBytes)
+                if (ctrlActive) onToggleCtrl()
+                if (altActive) onToggleAlt()
+            }
+        }
+    }
+}
+
+private fun sendChar(
+    char: Char,
+    ctrl: Boolean,
+    alt: Boolean,
+    onSendBytes: (ByteArray) -> Unit,
+) {
+    val byte = if (ctrl && char.code in 0x40..0x7F) {
+        byteArrayOf((char.code and 0x1F).toByte())
+    } else {
+        char.toString().toByteArray()
+    }
+
+    if (alt) {
+        onSendBytes(byteArrayOf(0x1b) + byte)
+    } else {
+        onSendBytes(byte)
+    }
+}
+
+@Composable
+private fun ComboKeyDropdown(
+    comboKeys: List<TerminalComboKey>,
+    focusRequester: FocusRequester,
+    imeVisible: Boolean,
+    view: android.view.View,
+    onSelect: (TerminalComboKey) -> Unit,
+) {
+    var expanded by remember { mutableStateOf(false) }
+    var keepImeOpen by remember { mutableStateOf(false) }
+    var lastDismissUptime by remember { mutableStateOf(0L) }
+
+    fun showImeIfNeeded() {
+        if (!keepImeOpen) return
+        view.post {
+            focusRequester.requestFocus()
+            val window = (view.context as? Activity)?.window ?: return@post
+            WindowCompat.getInsetsController(window, view).show(WindowInsetsCompat.Type.ime())
+        }
+    }
+
+    Box {
+        FilledTonalButton(
+            onClick = {
+                val dismissJustHappened = lastDismissUptime != 0L &&
+                    SystemClock.uptimeMillis() - lastDismissUptime <= MENU_ANCHOR_REOPEN_SUPPRESSION_MS
+                if (expanded || dismissJustHappened) {
+                    expanded = false
+                    lastDismissUptime = 0L
+                } else {
+                    lastDismissUptime = 0L
+                    keepImeOpen = imeVisible
+                    focusRequester.requestFocus()
+                    expanded = true
+                    showImeIfNeeded()
+                }
+            },
+            modifier = Modifier
+                .padding(horizontal = 1.dp)
+                .height(32.dp),
+            contentPadding = PaddingValues(horizontal = 8.dp, vertical = 0.dp),
+        ) {
+            Text(stringResource(R.string.combo_keys), fontSize = 11.sp, lineHeight = 11.sp)
+        }
+        DropdownMenu(
+            expanded = expanded,
+            onDismissRequest = {
+                expanded = false
+                lastDismissUptime = SystemClock.uptimeMillis()
+            },
+            modifier = Modifier.heightIn(max = 240.dp),
+            properties = PopupProperties(focusable = false),
+        ) {
+            comboKeys.forEach { comboKey ->
+                val displayLabel = if (comboKey.label == comboKey.keys) {
+                    comboKey.label
+                } else {
+                    "${comboKey.label}  ${comboKey.keys}"
+                }
+                DropdownMenuItem(
+                    text = { Text(displayLabel) },
+                    onClick = {
+                        expanded = false
+                        lastDismissUptime = 0L
+                        onSelect(comboKey)
+                        showImeIfNeeded()
+                    },
+                )
+            }
+        }
+    }
+}
+
+@Composable
+private fun SnippetsDropdown(
+    snippets: List<Snippet>,
+    focusRequester: FocusRequester,
+    imeVisible: Boolean,
+    view: android.view.View,
+    onSelect: (Snippet) -> Unit,
+) {
+    var expanded by remember { mutableStateOf(false) }
+    var keepImeOpen by remember { mutableStateOf(false) }
+    var lastDismissUptime by remember { mutableStateOf(0L) }
+
+    fun showImeIfNeeded() {
+        if (!keepImeOpen) return
+        view.post {
+            focusRequester.requestFocus()
+            val window = (view.context as? Activity)?.window ?: return@post
+            WindowCompat.getInsetsController(window, view).show(WindowInsetsCompat.Type.ime())
+        }
+    }
+
+    Box {
+        FilledTonalButton(
+            onClick = {
+                val dismissJustHappened = lastDismissUptime != 0L &&
+                    SystemClock.uptimeMillis() - lastDismissUptime <= MENU_ANCHOR_REOPEN_SUPPRESSION_MS
+                if (expanded || dismissJustHappened) {
+                    expanded = false
+                    lastDismissUptime = 0L
+                } else {
+                    lastDismissUptime = 0L
+                    keepImeOpen = imeVisible
+                    focusRequester.requestFocus()
+                    expanded = true
+                    showImeIfNeeded()
+                }
+            },
+            modifier = Modifier
+                .padding(horizontal = 1.dp)
+                .height(32.dp),
+            contentPadding = PaddingValues(horizontal = 8.dp, vertical = 0.dp),
+        ) {
+            Text(stringResource(R.string.snippets), fontSize = 11.sp, lineHeight = 11.sp)
+        }
+        DropdownMenu(
+            expanded = expanded,
+            onDismissRequest = {
+                expanded = false
+                lastDismissUptime = SystemClock.uptimeMillis()
+            },
+            modifier = Modifier.heightIn(max = 240.dp),
+            properties = PopupProperties(focusable = false),
+        ) {
+            if (snippets.isEmpty()) {
+                DropdownMenuItem(
+                    text = {
+                        Text(
+                            stringResource(R.string.no_saved_snippets),
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    },
+                    enabled = false,
+                    onClick = {},
+                )
+            } else {
+                snippets.forEach { snippet ->
+                    DropdownMenuItem(
+                        text = { Text(snippet.name) },
+                        onClick = {
+                            expanded = false
+                            lastDismissUptime = 0L
+                            onSelect(snippet)
+                            showImeIfNeeded()
+                        },
+                    )
+                }
+            }
+        }
+    }
+}
+
+// --- Nav block buttons (fixed width) ---
+
+/** Nav cell wrapper — ensures buttons and spacers occupy the exact same width. */
+@Composable
+private fun NavCell(content: @Composable () -> Unit) {
+    androidx.compose.foundation.layout.Box(
+        modifier = Modifier.width(NAV_CELL_WIDTH).height(32.dp),
+        contentAlignment = Alignment.Center,
+    ) {
+        content()
+    }
+}
+
+@Composable
+private fun NavArrowButton(label: String, onClick: () -> Unit) {
+    NavCell {
+        RepeatingButton(
+            onClick = onClick,
+            modifier = Modifier.fillMaxSize(),
+            contentPadding = PaddingValues(horizontal = 0.dp, vertical = 0.dp),
+        ) {
+            Text(
+                label,
+                fontSize = 16.sp,
+                lineHeight = 16.sp,
+                fontWeight = androidx.compose.ui.text.font.FontWeight.Bold,
+            )
+        }
+    }
+}
+
+@Composable
+private fun NavTextButton(label: String, onClick: () -> Unit) {
+    NavCell {
+        RepeatingButton(
+            onClick = onClick,
+            modifier = Modifier.fillMaxSize(),
+            contentPadding = PaddingValues(horizontal = 0.dp, vertical = 0.dp),
+        ) {
+            Text(label, fontSize = 11.sp, lineHeight = 11.sp)
+        }
+    }
+}
+
+// --- Key repeat ---
+
+private const val REPEAT_DELAY_MS = 400L
+private const val REPEAT_INTERVAL_MS = 80L
+
+/**
+ * FilledTonalButton with key repeat. Uses Android MotionEvent interop to detect
+ * press/release, bypassing Compose's gesture system (which the horizontalScroll
+ * parent intercepts). Consumes touch events and handles both tap and repeat.
+ */
+@OptIn(ExperimentalComposeUiApi::class)
+@Composable
+private fun RepeatingButton(
+    onClick: () -> Unit,
+    modifier: Modifier = Modifier,
+    contentPadding: PaddingValues = PaddingValues(horizontal = 8.dp, vertical = 0.dp),
+    content: @Composable () -> Unit,
+) {
+    var isPressed by remember { mutableStateOf(false) }
+    var didRepeat by remember { mutableStateOf(false) }
+
+    LaunchedEffect(isPressed) {
+        if (isPressed) {
+            didRepeat = false
+            delay(REPEAT_DELAY_MS)
+            didRepeat = true
+            while (true) {
+                onClick()
+                delay(REPEAT_INTERVAL_MS)
+            }
+        }
+    }
+
+    FilledTonalButton(
+        onClick = {}, // handled by pointerInteropFilter
+        modifier = modifier.pointerInteropFilter { motionEvent ->
+            when (motionEvent.action) {
+                android.view.MotionEvent.ACTION_DOWN -> {
+                    isPressed = true
+                    true // consume to receive UP
+                }
+                android.view.MotionEvent.ACTION_UP -> {
+                    if (!didRepeat) onClick() // single tap
+                    isPressed = false
+                    true
+                }
+                android.view.MotionEvent.ACTION_CANCEL -> {
+                    isPressed = false
+                    true
+                }
+                else -> false
+            }
+        },
+        contentPadding = contentPadding,
+    ) {
+        content()
+    }
+}
+
+// --- Standard buttons (variable width) ---
+
+@Composable
+private fun ToolbarArrowButton(label: String, onClick: () -> Unit) {
+    RepeatingButton(
+        onClick = onClick,
+        modifier = Modifier
+            .padding(horizontal = 1.dp)
+            .height(32.dp),
+    ) {
+        Text(
+            label,
+            fontSize = 16.sp,
+            lineHeight = 16.sp,
+            fontWeight = androidx.compose.ui.text.font.FontWeight.Bold,
+        )
+    }
+}
+
+@Composable
+private fun ToolbarTextButton(label: String, onClick: () -> Unit) {
+    RepeatingButton(
+        onClick = onClick,
+        modifier = Modifier
+            .padding(horizontal = 1.dp)
+            .height(32.dp),
+    ) {
+        Text(label, fontSize = 11.sp, lineHeight = 11.sp)
+    }
+}
+
+@Composable
+private fun ToolbarToggleButton(label: String, active: Boolean, onClick: () -> Unit) {
+    FilledTonalButton(
+        onClick = onClick,
+        modifier = Modifier
+            .padding(horizontal = 1.dp)
+            .height(32.dp),
+        contentPadding = PaddingValues(horizontal = 8.dp, vertical = 0.dp),
+        colors = if (active) {
+            ButtonDefaults.filledTonalButtonColors(
+                containerColor = MaterialTheme.colorScheme.primary,
+                contentColor = MaterialTheme.colorScheme.onPrimary,
+            )
+        } else {
+            ButtonDefaults.filledTonalButtonColors()
+        },
+    ) {
+        Text(label, fontSize = 11.sp, lineHeight = 11.sp)
+    }
+}
+
+@Composable
+private fun SymbolButton(label: String, onClick: () -> Unit) {
+    RepeatingButton(
+        onClick = onClick,
+        modifier = Modifier
+            .padding(horizontal = 1.dp)
+            .height(30.dp),
+        contentPadding = PaddingValues(horizontal = 6.dp, vertical = 0.dp),
+    ) {
+        Text(label, fontSize = 12.sp, lineHeight = 12.sp)
+    }
+}
+
+@Composable
+private fun ToolbarIconButton(icon: ImageVector, description: String, onClick: () -> Unit) {
+    IconButton(
+        onClick = onClick,
+        modifier = Modifier.size(32.dp),
+    ) {
+        Icon(icon, contentDescription = description, modifier = Modifier.size(18.dp))
+    }
+}

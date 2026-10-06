@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">HavenX</string>
+    <string name="nav_connections">Connect</string>
+    <string name="nav_terminal">Terminal</string>
+    <string name="nav_desktop">Desktop</string>
+    <string name="nav_sftp">Files</string>
+    <string name="nav_keys">Keys</string>
+    <string name="nav_settings">Settings</string>
+    <string name="app_name_debug">HavenX (Debug)</string>
+    <string name="toast_failed_load_file">Failed to load file</string>
+    <string name="toast_saved_uploading">Saved and uploaded</string>
+    <string name="toast_failed_save">Failed to save: %1$s</string>
+    <string name="toast_cannot_upload_disconnected">Cannot upload: disconnected</string>
+    <string name="search_text">Search text</string>
+    <string name="search_in_file">Search in file</string>
+    <string name="clear_search">Clear search</string>
+    <string name="close_search">Close search</string>
+    <string name="previous_match">Previous match</string>
+    <string name="next_match">Next match</string>
+    <string name="no_text_matches">No matches</string>
+</resources>

@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">HavenX</string>
+    <string name="nav_connections">连接</string>
+    <string name="nav_terminal">终端</string>
+    <string name="nav_desktop">桌面</string>
+    <string name="nav_sftp">文件</string>
+    <string name="nav_keys">密钥</string>
+    <string name="nav_settings">设置</string>
+    <string name="app_name_debug">HavenX（调试）</string>
+    <string name="toast_failed_load_file">加载文件失败</string>
+    <string name="toast_saved_uploading">已保存并上传完成</string>
+    <string name="toast_failed_save">保存失败：%1$s</string>
+    <string name="toast_cannot_upload_disconnected">无法上传：连接已断开</string>
+    <string name="search_text">搜索文本</string>
+    <string name="search_in_file">在文件中搜索</string>
+    <string name="clear_search">清空搜索</string>
+    <string name="close_search">关闭搜索</string>
+    <string name="previous_match">上一个匹配</string>
+    <string name="next_match">下一个匹配</string>
+    <string name="no_text_matches">无匹配</string>
+</resources>

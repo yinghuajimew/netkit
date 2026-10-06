@@ -1,0 +1,39 @@
+[package]
+name = "rdp-transport"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+crate-type = ["cdylib"]
+name = "rdp_transport"
+
+[dependencies]
+ironrdp-blocking = "0.8"
+ironrdp-connector = "0.8"
+ironrdp-session = "0.8"
+ironrdp-input = "0.5"
+ironrdp-cliprdr = "0.5"
+ironrdp-graphics = "0.7"
+ironrdp-tls = { version = "0.2", features = ["rustls"] }
+ironrdp-pdu = "0.7"
+smallvec = "1"
+log = "0.4"
+android_logger = "0.14"
+uniffi = { version = "0.28", features = ["cli"] }
+rustls = { version = "0.23", default-features = false, features = ["ring", "logging", "std", "tls12"] }
+
+[[bin]]
+name = "uniffi-bindgen"
+path = "uniffi-bindgen.rs"
+
+[build-dependencies]
+uniffi = { version = "0.28", features = ["build"] }
+
+[profile.release]
+opt-level = "z"
+lto = true
+# NB: strip removes UniFFI metadata symbols needed by uniffi-bindgen.
+# build-android.sh uses a debug host build for bindgen to work around this.
+strip = true
+codegen-units = 1
+panic = "abort"

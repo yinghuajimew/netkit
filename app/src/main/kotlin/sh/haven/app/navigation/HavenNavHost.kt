@@ -1,0 +1,295 @@
+package com.hension.havenx.navigation
+import androidx.compose.foundation.gestures.awaitEachGesture
+import androidx.compose.foundation.gestures.awaitFirstDown
+import androidx.compose.foundation.layout.WindowInsets
+import androidx.compose.foundation.layout.consumeWindowInsets
+import androidx.compose.foundation.layout.exclude
+import androidx.compose.foundation.layout.ime
+import androidx.compose.foundation.layout.imePadding
+import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.pager.HorizontalPager
+import androidx.compose.foundation.pager.PagerState
+import androidx.compose.foundation.pager.rememberPagerState
+import androidx.compose.material3.Icon
+import androidx.compose.material3.NavigationBar
+import androidx.compose.material3.NavigationBarItem
+import androidx.compose.material3.Scaffold
+import androidx.compose.material3.ScaffoldDefaults
+import androidx.compose.material3.Text
+import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.collectAsState
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.saveable.rememberSaveable
+import androidx.compose.runtime.setValue
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.input.pointer.PointerEventPass
+import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.input.pointer.positionChange
+import androidx.compose.ui.res.stringResource
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.launch
+import sh.haven.core.data.preferences.UserPreferencesRepository
+import sh.haven.feature.connections.ConnectionsScreen
+import sh.haven.feature.keys.KeysScreen
+import sh.haven.feature.settings.SettingsScreen
+import sh.haven.feature.sftp.SftpScreen
+import sh.haven.feature.terminal.TerminalScreen
+import kotlin.math.abs
+
+@Composable
+fun HavenNavHost(
+    preferencesRepository: UserPreferencesRepository,
+) {
+    val screens = Screen.entries
+    val pagerState = rememberPagerState { screens.size }
+    val coroutineScope = rememberCoroutineScope()
+    val terminalFontSize by preferencesRepository.terminalFontSize
+        .collectAsState(initial = UserPreferencesRepository.DEFAULT_FONT_SIZE)
+    val toolbarLayout by preferencesRepository.toolbarLayout
+        .collectAsState(initial = sh.haven.core.data.preferences.ToolbarLayout.DEFAULT)
+
+    // Profile ID to focus when navigating to terminal
+    var pendingTerminalProfileId by rememberSaveable { mutableStateOf<String?>(null) }
+    // Profile ID for opening a new session (new tab) on an existing connection
+    var pendingNewSessionProfileId by rememberSaveable { mutableStateOf<String?>(null) }
+
+    // VNC auto-connect params
+    var pendingVncHost by rememberSaveable { mutableStateOf<String?>(null) }
+    var pendingVncPort by rememberSaveable { mutableStateOf<Int?>(null) }
+    var pendingVncPassword by rememberSaveable { mutableStateOf<String?>(null) }
+    var pendingVncSshForward by rememberSaveable { mutableStateOf(false) }
+    var pendingVncSshSessionId by rememberSaveable { mutableStateOf<String?>(null) }
+
+    // SMB auto-connect params
+    var pendingSmbProfileId by rememberSaveable { mutableStateOf<String?>(null) }
+
+    // RDP auto-connect params
+    var pendingRdpHost by rememberSaveable { mutableStateOf<String?>(null) }
+    var pendingRdpPort by rememberSaveable { mutableStateOf<Int?>(null) }
+    var pendingRdpUsername by rememberSaveable { mutableStateOf<String?>(null) }
+    var pendingRdpPassword by rememberSaveable { mutableStateOf<String?>(null) }
+    var pendingRdpDomain by rememberSaveable { mutableStateOf<String?>(null) }
+    var pendingRdpSshForward by rememberSaveable { mutableStateOf(false) }
+    var pendingRdpSshSessionId by rememberSaveable { mutableStateOf<String?>(null) }
+    var pendingRdpSshProfileId by rememberSaveable { mutableStateOf<String?>(null) }
+
+    // Disable pager swipe while terminal text selection is active
+    var terminalSelectionActive by remember { mutableStateOf(false) }
+
+    // Desktop fullscreen hides bottom nav and system bars
+    var desktopFullscreen by remember { mutableStateOf(false) }
+
+    Scaffold(
+        contentWindowInsets = ScaffoldDefaults.contentWindowInsets.exclude(WindowInsets.ime),
+        bottomBar = {
+            if (!desktopFullscreen) {
+                NavigationBar {
+                    screens.forEachIndexed { index, screen ->
+                        val label = stringResource(screen.labelRes)
+                        NavigationBarItem(
+                            icon = { Icon(screen.icon, contentDescription = label) },
+                            label = { Text(label) },
+                            selected = pagerState.currentPage == index,
+                            onClick = {
+                                coroutineScope.launch {
+                                    pagerState.animateScrollToPage(index)
+                                }
+                            }
+                        )
+                    }
+                }
+            }
+        }
+    ) { innerPadding ->
+        HorizontalPager(
+            state = pagerState,
+            userScrollEnabled = pagerState.currentPage != Screen.Terminal.ordinal,
+            modifier = Modifier
+                .padding(innerPadding)
+                .consumeWindowInsets(innerPadding)
+                .imePadding(),
+        ) { page ->
+            when (screens[page]) {
+                Screen.Connections -> ConnectionsScreen(
+                    onNavigateToTerminal = { profileId ->
+                        pendingTerminalProfileId = profileId
+                        coroutineScope.launch {
+                            pagerState.animateScrollToPage(Screen.Terminal.ordinal)
+                        }
+                    },
+                    onNavigateToNewSession = { profileId ->
+                        pendingNewSessionProfileId = profileId
+                        coroutineScope.launch {
+                            pagerState.animateScrollToPage(Screen.Terminal.ordinal)
+                        }
+                    },
+                    onNavigateToVnc = { host, port, password ->
+                        pendingVncHost = host
+                        pendingVncPort = port
+                        pendingVncPassword = password
+                        pendingVncSshForward = false
+                        pendingVncSshSessionId = null
+                        coroutineScope.launch {
+                            pagerState.animateScrollToPage(Screen.Desktop.ordinal)
+                        }
+                    },
+                    onNavigateToRdp = { host, port, username, password, domain, sshForward, sshProfileId, sshSessionId ->
+                        pendingRdpHost = host
+                        pendingRdpPort = port
+                        pendingRdpUsername = username
+                        pendingRdpPassword = password
+                        pendingRdpDomain = domain
+                        pendingRdpSshForward = sshForward
+                        pendingRdpSshProfileId = sshProfileId
+                        pendingRdpSshSessionId = sshSessionId
+                        coroutineScope.launch {
+                            pagerState.animateScrollToPage(Screen.Desktop.ordinal)
+                        }
+                    },
+                    onNavigateToSmb = { profileId ->
+                        pendingSmbProfileId = profileId
+                        coroutineScope.launch {
+                            pagerState.animateScrollToPage(Screen.Sftp.ordinal)
+                        }
+                    },
+                )
+                Screen.Terminal -> {
+                    TerminalScreen(
+                        navigateToProfileId = pendingTerminalProfileId,
+                        newSessionProfileId = pendingNewSessionProfileId,
+                        isActive = pagerState.settledPage == Screen.Terminal.ordinal,
+                        fontSize = terminalFontSize,
+                        toolbarLayout = toolbarLayout,
+                        onNavigateToConnections = {
+                            coroutineScope.launch {
+                                pagerState.animateScrollToPage(Screen.Connections.ordinal)
+                            }
+                        },
+                        onNavigateToVnc = { host, port, password, sshForward, sshSessionId ->
+                            pendingVncHost = host
+                            pendingVncPort = port
+                            pendingVncPassword = password
+                            pendingVncSshForward = sshForward
+                            pendingVncSshSessionId = sshSessionId
+                            coroutineScope.launch {
+                                pagerState.animateScrollToPage(Screen.Desktop.ordinal)
+                            }
+                        },
+                        onSelectionActiveChanged = { terminalSelectionActive = it },
+                        terminalModifier = if (terminalSelectionActive) Modifier
+                            else Modifier.pagerSwipeOverride(pagerState, coroutineScope),
+                    )
+                    LaunchedEffect(pendingTerminalProfileId) {
+                        if (pendingTerminalProfileId != null) {
+                            pendingTerminalProfileId = null
+                        }
+                    }
+                    LaunchedEffect(pendingNewSessionProfileId) {
+                        if (pendingNewSessionProfileId != null) {
+                            pendingNewSessionProfileId = null
+                        }
+                    }
+                }
+                Screen.Desktop -> {
+                    val consumePending = {
+                        pendingVncHost = null
+                        pendingVncPort = null
+                        pendingVncPassword = null
+                        pendingVncSshForward = false
+                        pendingVncSshSessionId = null
+                        pendingRdpHost = null
+                        pendingRdpPort = null
+                        pendingRdpUsername = null
+                        pendingRdpPassword = null
+                        pendingRdpDomain = null
+                        pendingRdpSshForward = false
+                        pendingRdpSshSessionId = null
+                        pendingRdpSshProfileId = null
+                    }
+                    DesktopScreen(
+                        isActive = pagerState.settledPage == Screen.Desktop.ordinal,
+                        pendingVncHost = pendingVncHost,
+                        pendingVncPort = pendingVncPort,
+                        pendingVncPassword = pendingVncPassword,
+                        pendingVncSshForward = pendingVncSshForward,
+                        pendingVncSshSessionId = pendingVncSshSessionId,
+                        pendingRdpHost = pendingRdpHost,
+                        pendingRdpPort = pendingRdpPort,
+                        pendingRdpUsername = pendingRdpUsername,
+                        pendingRdpPassword = pendingRdpPassword,
+                        pendingRdpDomain = pendingRdpDomain,
+                        pendingRdpSshForward = pendingRdpSshForward,
+                        pendingRdpSshSessionId = pendingRdpSshSessionId,
+                        pendingRdpSshProfileId = pendingRdpSshProfileId,
+                        toolbarLayout = toolbarLayout,
+                        onPendingConsumed = consumePending,
+                        onFullscreenChanged = { desktopFullscreen = it },
+                    )
+                }
+                Screen.Sftp -> {
+                    SftpScreen(
+                        pendingSmbProfileId = pendingSmbProfileId,
+                        isActive = pagerState.currentPage == Screen.Sftp.ordinal,
+                    )
+                    LaunchedEffect(pendingSmbProfileId) {
+                        if (pendingSmbProfileId != null) {
+                            pendingSmbProfileId = null
+                        }
+                    }
+                }
+                Screen.Keys -> KeysScreen()
+                Screen.Settings -> SettingsScreen()
+            }
+        }
+    }
+}
+
+/**
+ * Intercepts horizontal drag gestures at [PointerEventPass.Initial] (before children)
+ * and forwards them to the [PagerState]. Vertical drags and taps pass through to children.
+ */
+private fun Modifier.pagerSwipeOverride(
+    pagerState: PagerState,
+    scope: CoroutineScope,
+): Modifier = pointerInput(pagerState) {
+    val touchSlopPx = viewConfiguration.touchSlop
+    awaitEachGesture {
+        awaitFirstDown(requireUnconsumed = false, pass = PointerEventPass.Initial)
+        var totalX = 0f
+        var totalY = 0f
+        var decided = false
+        var isHorizontal = false
+
+        do {
+            val event = awaitPointerEvent(PointerEventPass.Initial)
+            val change = event.changes.firstOrNull() ?: break
+            val delta = change.positionChange()
+            totalX += delta.x
+            totalY += delta.y
+
+            if (!decided && totalX * totalX + totalY * totalY > touchSlopPx * touchSlopPx) {
+                decided = true
+                isHorizontal = abs(totalX) > abs(totalY)
+            }
+
+            if (isHorizontal) {
+                change.consume()
+                pagerState.dispatchRawDelta(-delta.x)
+            }
+        } while (change.pressed)
+
+        if (isHorizontal) {
+            val threshold = size.width / 4
+            val target = when {
+                totalX < -threshold -> pagerState.currentPage + 1
+                totalX > threshold -> pagerState.currentPage - 1
+                else -> pagerState.currentPage
+            }.coerceIn(0, pagerState.pageCount - 1)
+            scope.launch { pagerState.animateScrollToPage(target) }
+        }
+    }
+}
